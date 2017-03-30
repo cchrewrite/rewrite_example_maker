@@ -1,5 +1,8 @@
-
-
+centralise_iter(0).
+partial_tree_breadth(3).
+partial_tree_depth(2).
+use_position_feat(no).
+prev_path_length(0).
 
 rewrite_basic([X,Y],X,Y,[]).
 rewrite_basic([X,Y],[T|L],[S|L],[1|P]):-
@@ -45,6 +48,10 @@ rewrite_numeric([T|LT],[T|LS],[R|LP]):-
   ground([T|LT]),
   rewrite_numeric(LT,LS,[P|LP]),
   R is P + 1.
+
+
+check_ground(X,X,[1]):-ground(X).
+  
 
 rewrite_all_to_polynominal(SExpr,TExpr):-
   RSet = [
@@ -96,14 +103,25 @@ rewrite_search(RSet,SExpr,TExpr,Path,MaxDepth,HintList):-
     HintList = [RN|RNList]
   ),
   dnn_rulelist(RSet,RList),
-  member([RN,X1,Y1],RList),
+  (
+    var(RN),
+    member([RN,X1,Y1],RList),
+    RN \= check_ground
+    ;
+    \+var(RN),
+    member([RN,X1,Y1],RList)
+  ),
   rewrite_rule_sym(N,RN),
   copy_term([X1,Y1],R),
   (
     RN = numeric,
     rewrite_numeric(SExpr,T,P)
     ;
+    RN = check_ground,
+    check_ground(SExpr,T,P)
+    ;
     RN \= numeric,
+    RN \= check_ground,
     rewrite_basic(R,SExpr,T,P)
   ),
   (
@@ -111,7 +129,11 @@ rewrite_search(RSet,SExpr,TExpr,Path,MaxDepth,HintList):-
     Path = [[SExpr,N,P]]
     ;
     \+cyclic_term(T),
-    \+searched(T),
+    (
+      \+searched(T)
+      ;
+      RN = check_ground
+    ),
     (
       ground(T),
       assert(searched(T))
@@ -138,6 +160,7 @@ rewrite_shortest(RSet,SExpr,TExpr,Path,MaxDepth,HintList):-
   assert(searched(SExpr)),
   rewrite_search(RSet,SExpr,TExpr,Path,Depth,HintList),
   length(Path,Depth),
+  retractall(searched(_)),
   !.
 
 substitute_all([],_,[]):-!.
@@ -219,18 +242,18 @@ tree_centralise(_,[novalue|L],Depth,[novalue|L]):-
   !.
 tree_centralise(FT,T,Depth,Res):-
   Depth > 0,
-  append(T1,[_|[]],T),
-  append(T1,[FT],[Func|ArgList]),
+  T = [Func|ArgList],
   D1 is Depth - 1,
+  append(AL,[_],ArgList),
   findall(
     PT,
     (
-      member(P,ArgList),
-      tree_centralise([Func|ArgList],P,D1,PT)
+      member(P,AL),
+      tree_centralise(T,P,D1,PT)
     ),
-    ArgListT
+    ALT
   ),
-  Res = [Func|ArgListT],
+  append([Func|ALT],[FT],Res),
   !.
   
 
@@ -253,9 +276,11 @@ cut_tree([X|L],Depth,[X|LT]):-
   length(LT,Len),
   !.
  
-
-tree_centralise_start([X|L],Depth,Res):-
+tree_centralise_start(X,_,0,X):-!.
+tree_centralise_start([X|L],Depth,DCent,Res):-
+  DCent > 0,
   D1 is Depth - 1,
+  DC1 is DCent - 1,
   findall(
     PT,
     (
@@ -265,19 +290,13 @@ tree_centralise_start([X|L],Depth,Res):-
     L1
   ),
   cut_tree([X|L1],Depth,[X|LT]),
-  (
-    LT = L,
-    Res = [X|LT]
-    ;
-    LT \= L,
-    tree_centralise_start([X|LT],Depth,Res)
-  ),
+  tree_centralise_start([X|LT],Depth,DC1,Res),
   !.
   
 
-produce_centralised_tree(T,Breadth,Depth,Res):-
+produce_centralised_tree(T,Breadth,Depth,DCent,Res):-
   get_partial_tree(T,Breadth,Depth,PT),
-  tree_centralise_start(PT,Depth,Res),
+  tree_centralise_start(PT,Depth,DCent,Res),
   !.
 
 
@@ -311,17 +330,14 @@ partial_tree_extension([],_,_,[]).
 partial_tree_extension([[Expr,Rule,Pos]|L],Breadth,Depth,Res):-
   tree_depth(Expr,ExprDepth),
   DFull is ExprDepth + Depth,
-  produce_centralised_tree(Expr,Breadth,DFull,CtdExpr),
-  (
-    ExprDepth > Depth,
-    D1 is ExprDepth - Depth
-    ;
-    ExprDepth =< Depth,
-    D1 = 0
-  ),
+  centralise_iter(CentIter),
+  produce_centralised_tree(Expr,Breadth,DFull,CentIter,CtdExpr),
   findall(
     [P,T,Rule,Pos],
     (
+      get_sub_tree(Expr,ExprDepth,XOrg,P),
+      XOrg \= novalue,
+      XOrg \= [novalue|_],
       get_sub_tree(CtdExpr,ExprDepth,X,P),
       X \= [novalue|_],
       get_partial_tree(X,Breadth,Depth,T)
@@ -329,7 +345,8 @@ partial_tree_extension([[Expr,Rule,Pos]|L],Breadth,Depth,Res):-
     ExList
   ),
   partial_tree_extension(L,Breadth,Depth,LT),
-  append(ExList,LT,Res).
+  length(ExList,Len1),
+  Res = [[Len1,ExList]|LT].
 
 :- dynamic num_tree_sym/1.
 :- dynamic tree_sym/2.
@@ -445,20 +462,32 @@ rulelist_to_vector([X|L],[X|LT]):-
   rulelist_to_vector(L,LT),
   !.
 
-produce_feature([],[]):-!.
-produce_feature([[P,T,[Rule|PrevRule],Pos]|L],[[PT,TT,ST,PosT,PRuleT]|LT]):-
+produce_feature_sub([],[]):-!.
+produce_feature_sub([[P,T,[Rule|PrevRule],Pos]|L],[[PT,TT,ST,PosT,PRuleT]|LT]):-
   tree_pos_to_vector(P,PT),
   flatten(T,FT),
   tree_to_vector(FT,TT),
   findall(
     W,
-    find_same_element(TT,W),
+    (
+      use_position_feat(yes),
+      find_same_element(TT,W)
+    ),
     S
   ),
   sel_to_vector(S,ST),
   rule_and_pos_to_vector([Rule|Pos],PosT),
   rulelist_to_vector(PrevRule,PRuleT),
-  produce_feature(L,LT).
+  produce_feature_sub(L,LT).
+
+
+produce_feature([],[]):-!.
+produce_feature([[N,ExList]|L],[[N,FeatList]|LT]):-
+  produce_feature_sub(ExList,FeatList),
+  produce_feature(L,LT),
+  !.
+
+
 
 write_element([],_).
 write_element([X|L],Stream):-
@@ -472,6 +501,24 @@ write_log_file:-
   write_by_line(Stream,L),
   close(Stream).
 
+
+
+write_feature_all(L):-
+  set_random(seed(777)),
+  random_permutation(L,LP),
+  length(LP,Len),
+  LenTe is round(Len * 0.165),
+  append(LTe,LTr,LP),
+  length(LTe,LenTe),
+  length(LTr,LenTr),
+  LenVa is round(LenTr * 0.2),
+  append(LVa,_,LTr),
+  length(LVa,LenVa),
+  write_feature_to_file(LTr,'rewrite_train.txt'),
+  write_feature_to_file(LVa,'rewrite_valid.txt'),
+  write_feature_to_file(LTe,'rewrite_eval.txt'),
+  !.
+
 write_feature_to_file(L,FileName):-
   open(FileName,write,Stream),
   num_tree_pos_sym(N1),
@@ -479,18 +526,27 @@ write_feature_to_file(L,FileName):-
   num_sel_sym(N3),
   num_rule_and_pos_sym(N4),
   num_rewrite_rule(N5),
-  L = [[_,T,_,_,PRule]|_],
+  L = [[_,[[_,T,_,_,PRule]|_]]|_],
   length(T,M),
   length(PRule,U),
   length(L,N),
   write_element([N,N1,M,N2,N3,N4,U,N5],Stream),
   nl(Stream),
+  print([N,N1,M,N2,N3,N4,U,N5]),
   write_feature(L,Stream),
   nl(Stream),
   close(Stream).
 
+
 write_feature([],_).
-write_feature([[P,T,S,R,PR]|L],Stream):-
+write_feature([[N,FeatList]|L],Stream):-
+  write(Stream,N),
+  nl(Stream),
+  write_feature_sub(FeatList,Stream),
+  write_feature(L,Stream).
+
+write_feature_sub([],_).
+write_feature_sub([[P,T,S,R,PR]|L],Stream):-
   write(Stream,P),
   nl(Stream),
   write_element(T,Stream),
@@ -504,7 +560,7 @@ write_feature([[P,T,S,R,PR]|L],Stream):-
   nl(Stream),
   write_element(PR,Stream),
   nl(Stream),
-  write_feature(L,Stream).
+  write_feature_sub(L,Stream).
  
 
 print_by_line([]).
@@ -571,6 +627,10 @@ expr_to_prefix([S,X],[S,XT]):-
     S = xsin
     ;
     S = xcos
+    ;
+    S = xint
+    ;
+    S = xabs
   ),
   expr_to_prefix(X,XT),
   !.
@@ -596,9 +656,9 @@ preprocess_expr(ExprList,Res):-
 :- dynamic rewrite_rule_sym/2.
 :- retractall(num_rewrite_rule(_)).
 :- retractall(rewrite_rule_sym(_,_)).
-:- assert(num_rewrite_rule(1)).
+:- assert(num_rewrite_rule(2)).
 :- assert(rewrite_rule_sym(1,numeric)).
-
+:- assert(rewrite_rule_sym(2,check_ground)).
 
 rule_to_sym([]):-!.
 rule_to_sym([[RN,_,_]|L]):-
@@ -650,15 +710,57 @@ print_by_line(ExprList),
       get_path(P,PPrt),
       nl,print('==>'),print(PPrt),nl,nl,
       write_to_log_file(['==>',PPrt]),
-      prev_path_extension(P,5,[],PList),
+      prev_path_length(PPLen),
+      prev_path_extension(P,PPLen,[],PList),
       member(PTemp,PList)
     ),
     ExPath
   ),
-  partial_tree_extension(ExPath,3,3,PT),
+  partial_tree_breadth(PTBreadth),
+  partial_tree_depth(PTDepth),
+  partial_tree_extension(ExPath,PTBreadth,PTDepth,PT),
   produce_feature(PT,FeT),
   %print_by_line(FeT),
   write_feature_to_file(FeT,'feat.txt').
+
+
+print_duplicate(R):-
+  nth1(I1,R,X),
+  nth1(I2,R,X),
+  I1 \= I2,
+  print([I1,I2,X]),
+  nl.
+
+run_main2_big:-
+  rule_set2(R),
+  rule_to_sym(R),
+  %test_expr(ExprList),
+  test_expr2_big(PreExprList),
+  preprocess_expr(PreExprList,ExprList),
+print_by_line(ExprList),
+  findall(
+    PTemp,
+    (
+      nth1(ExpN,ExprList,[X,Y,H]),
+      rewrite_shortest(R,X,Y,P,1000,H),
+      print(['ok!!!',ExpN,X,Y]),nl,
+      write_to_log_file(['ok!!!',ExpN,X,Y]),
+      get_path(P,PPrt),
+      nl,print('==>'),print(PPrt),nl,nl,
+      write_to_log_file(['==>',PPrt]),
+      prev_path_length(PPLen),
+      prev_path_extension(P,PPLen,[],PList),
+      member(PTemp,PList)
+    ),
+    ExPath
+  ),
+  partial_tree_breadth(PTBreadth),
+  partial_tree_depth(PTDepth),
+  partial_tree_extension(ExPath,PTBreadth,PTDepth,PT),
+  produce_feature(PT,FeT),
+  %print_by_line(FeT),
+  write_feature_to_file(FeT,'feat.txt').
+
 
 
 run_main3:-
@@ -678,15 +780,107 @@ print_by_line(ExprList),
       get_path(P,PPrt),
       nl,print('==>'),print(PPrt),nl,nl,
       write_to_log_file(['==>',PPrt]),
-      prev_path_extension(P,5,[],PList),
+      prev_path_length(PPLen),
+      prev_path_extension(P,PPLen,[],PList),
       member(PTemp,PList)
     ),
     ExPath
   ),
-  partial_tree_extension(ExPath,3,3,PT),
+  partial_tree_breadth(PTBreadth),
+  partial_tree_depth(PTDepth),
+  partial_tree_extension(ExPath,PTBreadth,PTDepth,PT),
   produce_feature(PT,FeT),
   %print_by_line(FeT),
   write_feature_to_file(FeT,'feat.txt').
+
+
+
+run_main4:-
+  rule_set4(R),
+  rule_to_sym(R),
+  %test_expr(ExprList),
+  test_expr4(PreExprList),
+  preprocess_expr(PreExprList,ExprList),
+print_by_line(ExprList),
+  findall(
+    PTemp,
+    (
+      nth1(ExpN,ExprList,[X,Y,H]),
+      rewrite_shortest(R,X,Y,P,1000,H),
+      print(['ok!!!',ExpN,X,Y]),nl,
+      write_to_log_file(['ok!!!',ExpN,X,Y]),
+      get_path(P,PPrt),
+      nl,print('==>'),print(PPrt),nl,nl,
+      write_to_log_file(['==>',PPrt]),
+      prev_path_length(PPLen),
+      prev_path_extension(P,PPLen,[],PList),
+      member(PTemp,PList)
+    ),
+    ExPath
+  ),
+  partial_tree_breadth(PTBreadth),
+  partial_tree_depth(PTDepth),
+  partial_tree_extension(ExPath,PTBreadth,PTDepth,PT),
+  produce_feature(PT,FeT),
+  %print_by_line(FeT),
+  write_feature_to_file(FeT,'feat.txt').
+
+
+
+
+
+rulesetcomp(R1,R2,R):-
+  findall(
+    [RN,X,Y],
+    (
+      member([RN,X,Y],R2),
+      \+member([RN,_,_],R1)
+    ),
+    R2T
+  ),
+  append(R1,R2T,R).
+
+run_main_big:-
+  rule_set2(R2),
+  rule_set3(R3),
+  rule_set4(R4),
+  rulesetcomp(R2,R3,R5),
+  rulesetcomp(R5,R4,R),
+  print_by_line(R),
+  rule_to_sym(R),
+  %test_expr(ExprList),
+  test_expr2_big(PreExprList2),
+  test_expr3_big(PreExprList3),
+  test_expr4_big(PreExprList4),
+  append(PreExprList2,PreExprList3,PreExprList5),
+  append(PreExprList5,PreExprList4,PreExprList),
+  preprocess_expr(PreExprList,ExprList),
+  findall(
+    PTemp,
+    (
+      nth1(ExpN,ExprList,[X,Y,H]),
+      rewrite_shortest(R,X,Y,P,1000,H),
+      print(['ok!!!',ExpN,X,Y]),nl,
+      write_to_log_file(['ok!!!',ExpN,X,Y]),
+      get_path(P,PPrt),
+      nl,print('==>'),print(PPrt),nl,nl,
+      write_to_log_file(['==>',PPrt]),
+      prev_path_length(PPLen),
+      prev_path_extension(P,PPLen,[],PList),
+      member(PTemp,PList)
+    ),
+    ExPath
+  ),
+  partial_tree_breadth(PTBreadth),
+  partial_tree_depth(PTDepth),
+  partial_tree_extension(ExPath,PTBreadth,PTDepth,PT),
+  produce_feature(PT,FeT),
+  %print_by_line(FeT),
+  write_feature_all(FeT).
+
+
+
+
 
 rewrite_given_path(_,_,[sflag|_]):-!.
 rewrite_given_path(_,_,[]):-!.
@@ -700,10 +894,14 @@ print(R),
     RN \= numeric,
     RN \= all_to_polynominal,
     RN \= auto,
+    RN \= check_ground,
     rewrite_basic(R,Expr,T,_)
     ;
     RN = numeric,
     rewrite_numeric(Expr,T,_)
+    ;
+    RN = check_ground,
+    check_ground(Expr,T,_)
     ;
     RN = all_to_polynominal,
     rewrite_all_to_polynominal(Expr,T)
@@ -727,7 +925,7 @@ print(R),
 
 
 rewrite_test_temp:-
-  rule_set3(RSet),
+  rule_set4(RSet),
   rule_to_sym(RSet),
 
   %Expr = [[xequal,[xplus,[xmult,[xnum,2],x],[xnum,5]],[xplus,[xmult,[xnum,1],x],[xnum,19]]],[xequal,x,[xnum,14]]],
@@ -741,8 +939,12 @@ rewrite_test_temp:-
 
 
 
-  Expr = [[xdiv,[xder,[xmult,[xsin,x],[xcos,x]]],[xder,x]],[xcos,[xmult,[xnum,2],x]]],
-  Path = [sincos,dmult1,dconst,mult_zero1,plus_zero1,dchain1,dsin,dmult1,dconst,mult_zero1,plus_zero1,div_to_1,numeric,mult_comm,mult_asso1,numeric],
+  Expr = [
+[xint,[xmult,[xmult,[xpower,x,[xnum,2]],[xpower,xexp,x]],[xder,x]]],[xplus,[xplus,[xminus,[xmult,[xpower,x,[xnum,2]],[xpower,xexp,x]],[xmult,[xnum,2],[xmult,x,[xpower,xexp,x]]]],[xmult,[xnum,2],[xpower,xexp,x]]],sp_c]
+  ],
+  Path = [
+mult_asso1,dsubsexp,lne,power_one,mult_asso2,mult_one1,intbyparts,dextpower,numeric,power_to_mult3,mult_asso2,mult_comm,mult_asso1,imultconst,mult_asso1,dsubsexp,lne,power_one,mult_asso2,mult_one1,intbyparts,iexp,lne,power_one,mult_comm,mult_one1,add_comm,minus_to_plus1,add_comm,add_comm,add_comm,mult_dist1,add_asso2,minus_to_plus2,num_mult_c,minus_to_plus1,mult_asso2,numeric,minus_to_plus1,mult_dist1,num_mult_c,mult_dist1,mult_asso2,numeric,auto
+  ],
 
 
   nl,print(Expr),nl,nl,
